@@ -17,7 +17,7 @@ struct Config {
   bool bootstrap_schema = true;
   bool ohlcv_enabled = true;
   bool gov_enabled = true;
-  int loop_sleep = 300;
+  int loop_sleep = 60;
 
   std::string ohlcv_provider = "binance_spot";
   std::string ohlcv_base = "https://api.binance.com";

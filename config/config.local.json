@@ -11,7 +11,7 @@
     "run_once": false,
     "bootstrap_schema": true,
     "enabled_sources": ["ohlcv", "governance"],
-    "loop_sleep_seconds": 300
+    "loop_sleep_seconds": 60
   },
   "ohlcv": {
     "enabled": true,

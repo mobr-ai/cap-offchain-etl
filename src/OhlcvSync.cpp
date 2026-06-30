@@ -9,6 +9,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -27,6 +28,132 @@ long long normalize_epoch_ms(long long value)
 
   return value;
 }
+
+
+const long long HOUR_MS = 3600000LL;
+
+long long utc_now_ms()
+{
+  return static_cast<long long>(time(nullptr)) * 1000LL;
+}
+
+long long hour_start_ms(long long milliseconds)
+{
+  return (milliseconds / HOUR_MS) * HOUR_MS;
+}
+
+struct KlineRow {
+  long long open_ms{};
+  std::string open;
+  std::string high;
+  std::string low;
+  std::string close;
+  std::string volume;
+  bool final{};
+};
+
+struct CurrentCandleState {
+  long long open_ms{};
+  bool final{true};
+  long long updated_at_ms{};
+  std::string close;
+};
+
+std::string candle_status(bool final)
+{
+  return final ? "final" : "provisional";
+}
+
+std::string market_entity(const AssetMap& asset)
+{
+  return asset.source_market_id.empty()
+    ? asset.source + ":" + asset.source_asset
+    : asset.source_market_id;
+}
+
+std::string current_candle_state_file(const Config& config)
+{
+  std::filesystem::path directory = config.archive_tmp_dir.empty()
+    ? std::filesystem::path("/tmp/cap-offchain-etl")
+    : std::filesystem::path(config.archive_tmp_dir);
+
+  return (directory / "ohlcv_current_state.csv").string();
+}
+
+std::map<std::string, CurrentCandleState> load_current_candle_state(
+  const Config& config
+)
+{
+  std::map<std::string, CurrentCandleState> output;
+  std::ifstream file(current_candle_state_file(config));
+
+  if(!file) {
+    return output;
+  }
+
+  std::string line;
+
+  while(std::getline(file, line)) {
+    line = trim(line);
+
+    if(line.empty()) {
+      continue;
+    }
+
+    auto values = split_csv(line);
+
+    if(values.size() < 5 || values[0] == "entity") {
+      continue;
+    }
+
+    try {
+      CurrentCandleState state;
+      state.open_ms = std::stoll(values[1]);
+      state.final = values[2] == "final" || values[2] == "true" || values[2] == "1";
+      state.updated_at_ms = std::stoll(values[3]);
+      state.close = values[4];
+
+      output[values[0]] = state;
+    } catch(...) {
+      log("WARN", "Ignoring invalid OHLCV current-state line: " + line);
+    }
+  }
+
+  return output;
+}
+
+void save_current_candle_state(
+  const Config& config,
+  const std::map<std::string, CurrentCandleState>& state
+)
+{
+  std::filesystem::path path = current_candle_state_file(config);
+  std::filesystem::create_directories(path.parent_path());
+
+  std::filesystem::path tmp_path = path.string() + ".tmp";
+
+  std::ofstream file(tmp_path);
+
+  if(!file) {
+    throw std::runtime_error("cannot write OHLCV current-state file: " + tmp_path.string());
+  }
+
+  file << "entity,open_time_ms,status,updated_at_ms,close\n";
+
+  for(const auto& item : state) {
+    file
+      << item.first << ","
+      << item.second.open_ms << ","
+      << candle_status(item.second.final) << ","
+      << item.second.updated_at_ms << ","
+      << item.second.close << "\n";
+  }
+
+  file.close();
+
+  std::filesystem::rename(tmp_path, path);
+}
+
 
 void upsert_checkpoint(
   Db& db,
@@ -80,7 +207,7 @@ bool checkpoint_exists(
 
 std::string latest_ohlcv_checkpoint(Db& db, const AssetMap& asset)
 {
-  const std::string entity = asset.source_market_id;
+  const std::string entity = market_entity(asset);
 
   std::string last_open = get_checkpoint(
     db,
@@ -101,6 +228,14 @@ std::string latest_ohlcv_checkpoint(Db& db, const AssetMap& asset)
   long long last_open_ms = last_open.empty() ? 0 : std::stoll(last_open);
   long long last_empty_search_ms =
     last_empty_search.empty() ? 0 : std::stoll(last_empty_search);
+
+  // Do not let a temporary empty response for the live/current hour
+  // move the effective checkpoint beyond the active candle.
+  long long current_hour_open_ms = hour_start_ms(utc_now_ms());
+
+  if(last_empty_search_ms >= current_hour_open_ms) {
+    last_empty_search_ms = 0;
+  }
 
   long long latest_attempt_ms = std::max(last_open_ms, last_empty_search_ms);
 
@@ -202,34 +337,41 @@ std::string market_source_db_id(Db& db, const AssetMap& asset)
   );
 }
 
-std::vector<std::vector<std::string>> parse_klines(const std::string& body)
+std::vector<KlineRow> parse_klines(const std::string& body, long long now_ms)
 {
-  std::vector<std::vector<std::string>> output;
-  std::regex row_regex("\\[([0-9]+),\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\"");
+  std::vector<KlineRow> output;
+
+  std::regex row_regex(
+    "\\[([0-9]+),\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\",\"([^\"]+)\",([0-9]+)"
+  );
 
   for(
     std::sregex_iterator it(body.begin(), body.end(), row_regex), end;
     it != end;
     ++it
   ) {
+    long long open_ms = normalize_epoch_ms(std::stoll((*it)[1].str()));
+    long long close_ms = normalize_epoch_ms(std::stoll((*it)[7].str()));
+
     output.push_back({
-      (*it)[1],
-      (*it)[2],
-      (*it)[3],
-      (*it)[4],
-      (*it)[5],
-      (*it)[6]
+      open_ms,
+      (*it)[2].str(),
+      (*it)[3].str(),
+      (*it)[4].str(),
+      (*it)[5].str(),
+      (*it)[6].str(),
+      now_ms > close_ms
     });
   }
 
   return output;
 }
 
-std::vector<std::vector<std::string>> parse_binance_kline_csv(
+std::vector<KlineRow> parse_binance_kline_csv(
   const std::string& csv
 )
 {
-  std::vector<std::vector<std::string>> output;
+  std::vector<KlineRow> output;
   std::stringstream stream(csv);
   std::string line;
 
@@ -242,21 +384,22 @@ std::vector<std::vector<std::string>> parse_binance_kline_csv(
 
     auto values = split_csv(line);
 
-    if(values.size() < 7) {
+    if(values.size() < 6) {
       continue;
     }
 
-    if(!std::isdigit(static_cast<unsigned char>(values[0][0]))) {
+    if(values[0].empty() || !std::isdigit(static_cast<unsigned char>(values[0][0]))) {
       continue;
     }
 
     output.push_back({
-      values[0],
+      normalize_epoch_ms(std::stoll(values[0])),
       values[1],
       values[2],
       values[3],
       values[4],
-      values[5]
+      values[5],
+      true
     });
   }
 
@@ -314,7 +457,9 @@ std::vector<std::string> generate_binance_daily_kline_archive_keys(
 void upsert_ohlcv_rows(
   Db& db,
   const AssetMap& asset,
-  const std::vector<std::vector<std::string>>& rows
+  const std::vector<KlineRow>& rows,
+  const Config* config = nullptr,
+  std::map<std::string, CurrentCandleState>* current_state = nullptr
 )
 {
   if(rows.empty()) {
@@ -329,11 +474,12 @@ void upsert_ohlcv_rows(
     );
   }
 
-  long long max_open_ms = 0;
+  long long max_final_open_ms = 0;
 
   for(const auto& row : rows) {
-    long long open_ms = normalize_epoch_ms(std::stoll(row[0]));
-    max_open_ms = std::max(max_open_ms, open_ms);
+    if(row.final) {
+      max_final_open_ms = std::max(max_final_open_ms, row.open_ms);
+    }
 
     db.exec(
       "INSERT INTO asset_ohlcv("
@@ -342,13 +488,13 @@ void upsert_ohlcv_rows(
       ") VALUES("
       "'" + shell_escape(asset.asset_id) + "'," +
       market_id + ","
-      "to_timestamp(" + std::to_string(open_ms / 1000) + "),"
+      "to_timestamp(" + std::to_string(row.open_ms / 1000) + "),"
       "'1h'," +
-      row[1] + "," +
-      row[2] + "," +
-      row[3] + "," +
-      row[4] + "," +
-      row[5] + ","
+      row.open + "," +
+      row.high + "," +
+      row.low + "," +
+      row.close + "," +
+      row.volume + ","
       "'" + shell_escape(asset.source) + "',"
       "'" + shell_escape(asset.source_asset) + "',"
       "'" + shell_escape(asset.quote) + "'"
@@ -366,27 +512,48 @@ void upsert_ohlcv_rows(
     );
   }
 
-  const std::string entity = asset.source_market_id.empty()
-    ? asset.source + ":" + asset.source_asset
-    : asset.source_market_id;
+  const std::string entity = market_entity(asset);
 
-  std::string current_checkpoint = get_checkpoint(
-    db,
-    "ohlcv",
-    entity,
-    "last_open_time_ms",
-    "0"
-  );
-
-  long long current_ms = std::stoll(current_checkpoint);
-
-  if(max_open_ms > current_ms) {
-    upsert_checkpoint(
+  if(max_final_open_ms > 0) {
+    std::string current_checkpoint = get_checkpoint(
       db,
       "ohlcv",
       entity,
       "last_open_time_ms",
-      std::to_string(max_open_ms)
+      "0"
+    );
+
+    long long current_ms = std::stoll(current_checkpoint);
+
+    if(max_final_open_ms > current_ms) {
+      upsert_checkpoint(
+        db,
+        "ohlcv",
+        entity,
+        "last_open_time_ms",
+        std::to_string(max_final_open_ms)
+      );
+    }
+  }
+
+  if(config && current_state) {
+    const KlineRow& latest = rows.back();
+
+    (*current_state)[entity] = {
+      latest.open_ms,
+      latest.final,
+      utc_now_ms(),
+      latest.close
+    };
+
+    save_current_candle_state(*config, *current_state);
+
+    log(
+      "INFO",
+      "OHLCV current-state " + entity +
+      " ts=" + ms_to_iso(latest.open_ms) +
+      " status=" + candle_status(latest.final) +
+      " close=" + latest.close
     );
   }
 }
@@ -461,12 +628,10 @@ void sync_binance_archives(Db& db, const Config& config, const AssetMap& asset)
       );
 
       auto rows = parse_binance_kline_csv(csv);
-      std::vector<std::vector<std::string>> filtered;
+      std::vector<KlineRow> filtered;
 
       for(const auto& row : rows) {
-        long long open_ms = normalize_epoch_ms(std::stoll(row[0]));
-
-        if(open_ms >= bootstrap_ms && open_ms <= archive_end_ms) {
+        if(row.open_ms >= bootstrap_ms && row.open_ms <= archive_end_ms) {
           filtered.push_back(row);
         }
       }
@@ -665,6 +830,7 @@ void sync_ohlcv(Db& db, const Config& config)
     throw std::runtime_error("curl init failed for OHLCV URL encoding");
   }
 
+  auto current_state = load_current_candle_state(config);
   for(const auto& asset : assets) {
     try {
       sync_binance_archives(db, config, asset);
@@ -680,20 +846,35 @@ void sync_ohlcv(Db& db, const Config& config)
         continue;
       }
 
+      const std::string entity = market_entity(asset);
+
       std::string checkpoint = latest_ohlcv_checkpoint(db, asset);
       long long start = bootstrap_ms;
 
       if(!checkpoint.empty() && checkpoint != "0") {
-        start = std::max(bootstrap_ms, std::stoll(checkpoint) + 3600000LL);
+        start = std::max(bootstrap_ms, std::stoll(checkpoint) + HOUR_MS);
       }
 
-      long long now_ms = static_cast<long long>(time(nullptr)) * 1000LL;
+      // If the previous run stopped while a candle was provisional,
+      // resume from that same candle so it can be refreshed or finalized.
+      auto state_it = current_state.find(entity);
+
+      if(
+        state_it != current_state.end() &&
+        !state_it->second.final &&
+        state_it->second.open_ms >= bootstrap_ms
+      ) {
+        start = std::min(start, state_it->second.open_ms);
+      }
+
+      long long now_ms = utc_now_ms();
       long long sync_until_ms = std::min(now_ms, valid_end_ms);
       int empty_count = 0;
 
-      while(start < sync_until_ms - 3600000LL) {
+      // Fetch through the active candle. The last returned candle may be provisional.
+      while(start <= sync_until_ms) {
         long long end = start +
-          static_cast<long long>(config.request_limit - 1) * 3600000LL;
+          static_cast<long long>(config.request_limit - 1) * HOUR_MS;
 
         if(end > sync_until_ms) {
           end = sync_until_ms;
@@ -717,7 +898,8 @@ void sync_ohlcv(Db& db, const Config& config)
           break;
         }
 
-        auto rows = parse_klines(response.body);
+        long long response_now_ms = utc_now_ms();
+        auto rows = parse_klines(response.body, response_now_ms);
 
         if(rows.empty()) {
           log(
@@ -728,16 +910,28 @@ void sync_ohlcv(Db& db, const Config& config)
             "; advancing search window"
           );
 
-          start = end + 3600000LL;
+          long long current_hour_open_ms = hour_start_ms(response_now_ms);
 
-          upsert_checkpoint(
-            db,
-            "ohlcv",
-            asset.source_market_id,
-            "last_empty_search_ms",
-            std::to_string(end)
-          );
+          // Only checkpoint empty historical windows.
+          // Never checkpoint an empty live/current-hour window, otherwise the app
+          // could skip the active candle after a temporary provider issue.
+          if(end < current_hour_open_ms) {
+            upsert_checkpoint(
+              db,
+              "ohlcv",
+              entity,
+              "last_empty_search_ms",
+              std::to_string(end)
+            );
+          } else {
+            log(
+              "WARN",
+              "Keeping empty-search checkpoint unchanged for live window " +
+              asset.source_asset
+            );
+          }
 
+          start = end + HOUR_MS;
           ++empty_count;
 
           if(empty_count >= config.empty_advances) {
@@ -756,17 +950,26 @@ void sync_ohlcv(Db& db, const Config& config)
         }
 
         empty_count = 0;
-        upsert_ohlcv_rows(db, asset, rows);
 
-        long long last = normalize_epoch_ms(std::stoll(rows.back()[0]));
+        upsert_ohlcv_rows(
+          db,
+          asset,
+          rows,
+          &config,
+          &current_state
+        );
+
+        const KlineRow& latest = rows.back();
+
         log(
           "INFO",
           "OHLCV API synced " + asset.source_asset +
           " candles=" + std::to_string(rows.size()) +
-          " through " + ms_to_iso(last)
+          " through " + ms_to_iso(latest.open_ms) +
+          " status=" + candle_status(latest.final)
         );
 
-        start = last + 3600000LL;
+        start = latest.open_ms + HOUR_MS;
 
         std::this_thread::sleep_for(
           std::chrono::milliseconds(config.request_pause_ms)

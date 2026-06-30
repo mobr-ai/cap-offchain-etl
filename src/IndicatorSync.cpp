@@ -113,7 +113,11 @@ std::vector<Candle> load_candles(
 
 bool should_write(const std::string& candle_ts, const std::string& checkpoint)
 {
-  return checkpoint.empty() || candle_ts > checkpoint;
+  // Recompute the checkpoint candle too.
+  // This is necessary because the latest 1h candle may already exist
+  // in asset_ohlcv as provisional and then get overwritten with the
+  // official final OHLCV values after the hour closes.
+  return checkpoint.empty() || candle_ts >= checkpoint;
 }
 
 void upsert_indicator(

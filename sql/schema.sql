@@ -100,49 +100,90 @@ CREATE TABLE IF NOT EXISTS etl_checkpoint (
   PRIMARY KEY(source, entity_id, checkpoint_key)
 );
 
-CREATE TABLE IF NOT EXISTS offchain_governance_source (
-  id BIGSERIAL PRIMARY KEY,
-  provider TEXT NOT NULL,
-  source_type TEXT NOT NULL,
-  external_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  discovered_from TEXT,
-  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  enabled BOOLEAN NOT NULL DEFAULT true,
-  UNIQUE(provider, external_id)
-);
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_source_type ON offchain_governance_source(source_type);
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_source_url ON offchain_governance_source(url);
+DROP TABLE IF EXISTS offchain_governance_metadata_fetch_log;
+DROP TABLE IF EXISTS offchain_governance_metadata;
+DROP TABLE IF EXISTS offchain_governance_source;
+DROP TABLE IF EXISTS offchain_governance_fetch_log;
+DROP TABLE IF EXISTS offchain_governance_proposal;
 
-CREATE TABLE IF NOT EXISTS offchain_governance_metadata (
+CREATE TABLE IF NOT EXISTS offchain_governance_proposal (
   id BIGSERIAL PRIMARY KEY,
+
   provider TEXT NOT NULL,
-  metadata_type TEXT NOT NULL,
-  external_id TEXT NOT NULL,
-  url TEXT NOT NULL,
-  content_type TEXT,
-  http_status INTEGER,
+
+  source_system TEXT NOT NULL,
+  source_endpoint TEXT NOT NULL,
+  source_external_id TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+
   title TEXT,
   abstract TEXT,
   motivation TEXT,
   rationale TEXT,
-  given_name TEXT,
-  raw_content TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL,
-  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(provider, external_id, content_sha256)
-);
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_metadata_type ON offchain_governance_metadata(metadata_type);
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_metadata_external_id ON offchain_governance_metadata(external_id);
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_metadata_url ON offchain_governance_metadata(url);
 
-CREATE TABLE IF NOT EXISTS offchain_governance_metadata_fetch_log (
+  proposer_name TEXT,
+  proposer_url TEXT,
+  proposer_id TEXT,
+
+  lifecycle_status TEXT,
+  governance_action_type TEXT,
+
+  governance_action_tx_id TEXT,
+  governance_action_index INTEGER,
+  governance_action_id TEXT,
+
+  metadata_url TEXT,
+  metadata_hash TEXT,
+
+  requested_lovelace NUMERIC(38,0),
+
+  raw_content TEXT NOT NULL,
+  raw_text TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+
+  http_status INTEGER,
+  content_type TEXT,
+
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  enabled BOOLEAN NOT NULL DEFAULT true,
+
+  UNIQUE(provider, source_system, source_endpoint, source_external_id, content_sha256)
+);
+
+CREATE INDEX IF NOT EXISTS idx_offchain_gov_proposal_provider_status
+  ON offchain_governance_proposal(provider, lifecycle_status);
+
+CREATE INDEX IF NOT EXISTS idx_offchain_gov_proposal_action
+  ON offchain_governance_proposal(governance_action_tx_id, governance_action_index);
+
+CREATE INDEX IF NOT EXISTS idx_offchain_gov_proposal_action_id
+  ON offchain_governance_proposal(governance_action_id);
+
+CREATE INDEX IF NOT EXISTS idx_offchain_gov_proposal_proposer_lower
+  ON offchain_governance_proposal(lower(coalesce(proposer_name, '')));
+
+CREATE INDEX IF NOT EXISTS idx_offchain_gov_proposal_title_search
+  ON offchain_governance_proposal
+  USING gin(
+    to_tsvector(
+      'simple',
+      coalesce(title, '') || ' ' ||
+      coalesce(abstract, '') || ' ' ||
+      coalesce(motivation, '') || ' ' ||
+      coalesce(rationale, '') || ' ' ||
+      coalesce(proposer_name, '')
+    )
+  );
+
+CREATE TABLE IF NOT EXISTS offchain_governance_fetch_log (
   id BIGSERIAL PRIMARY KEY,
   provider TEXT NOT NULL,
+  source_system TEXT NOT NULL,
   url TEXT NOT NULL,
   http_status INTEGER,
   error TEXT,
   attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS ix_offchain_governance_metadata_fetch_log_url ON offchain_governance_metadata_fetch_log(url);

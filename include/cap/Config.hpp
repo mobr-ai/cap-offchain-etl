@@ -56,6 +56,21 @@ struct Config {
   int gov_max_links = 500;
   int gov_refetch_hours = 24;
   std::vector<std::string> gov_discovery;
+
+  std::string gov_outcomes_api_base = "https://be.outcomes.gov.tools";
+  std::string gov_proposal_pillar_api_base = "https://be.pdf.gov.tools/api";
+
+  std::vector<std::string> gov_outcomes_endpoints = {
+    "/governance-actions"
+  };
+
+  std::vector<std::string> gov_proposal_pillar_endpoints = {
+    "/proposals",
+    "/proposal-discussions",
+    "/budget-proposals",
+    "/budget-discussions",
+    "/governance-actions"
+  };
 };
 
 Config load_config(const std::string& path);

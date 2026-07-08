@@ -7,6 +7,29 @@
 
 namespace cap {
 
+std::vector<std::string> parse_string_array(
+  const JsonValue& root,
+  std::initializer_list<const char*> path,
+  const std::vector<std::string>& fallback
+)
+{
+  const JsonValue* value = json_at(root, path);
+
+  if(!value || value->type != JsonValue::Type::Array) {
+    return fallback;
+  }
+
+  std::vector<std::string> output;
+
+  for(const auto& item : value->array) {
+    if(item.type == JsonValue::Type::String && !trim(item.str).empty()) {
+      output.push_back(trim(item.str));
+    }
+  }
+
+  return output.empty() ? fallback : output;
+}
+
 
 std::vector<int> parse_int_list(const std::string& value, const std::vector<int>& fallback)
 {
@@ -205,6 +228,30 @@ Config load_config(const std::string& path)
       "https://gov.tools/outcomes/governance_actions"
     };
   }
+
+  config.gov_outcomes_api_base = json_string_at(
+    root,
+    {"governance", "outcomes_api_base_url"},
+    config.gov_outcomes_api_base
+  );
+
+  config.gov_proposal_pillar_api_base = json_string_at(
+    root,
+    {"governance", "proposal_pillar_api_base_url"},
+    config.gov_proposal_pillar_api_base
+  );
+
+  config.gov_outcomes_endpoints = parse_string_array(
+    root,
+    {"governance", "outcomes_endpoints"},
+    config.gov_outcomes_endpoints
+  );
+
+  config.gov_proposal_pillar_endpoints = parse_string_array(
+    root,
+    {"governance", "proposal_pillar_endpoints"},
+    config.gov_proposal_pillar_endpoints
+  );
 
   return config;
 }

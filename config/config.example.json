@@ -46,12 +46,22 @@
   "governance": {
     "enabled": true,
     "provider": "govtool_public",
-    "discovery_urls": [
-      "https://gov.tools/proposal_discussion",
-      "https://gov.tools/budget_discussion",
-      "https://gov.tools/outcomes/governance_actions"
+
+    "outcomes_api_base_url": "https://be.outcomes.gov.tools",
+    "proposal_pillar_api_base_url": "https://be.pdf.gov.tools/api",
+
+    "outcomes_endpoints": [
+      "/governance-actions"
     ],
-    "manual_source_file": "/app/config/governance_sources.csv",
+
+    "proposal_pillar_endpoints": [
+      "/proposals",
+      "/proposal-discussions",
+      "/budget-proposals",
+      "/budget-discussions",
+      "/governance-actions"
+    ],
+
     "request_pause_ms": 500,
     "max_discovered_links_per_cycle": 500,
     "refetch_after_hours": 24
